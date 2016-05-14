@@ -9,14 +9,16 @@ import Router from '../Router'
 describe('When a router enters a branch', function () {
   let
     node,
-    newsLeaveHookSpy, removeNewsLeaveHook, userLeaveHookSpy,
+    newsLeaveHookSpy, removeNewsLeaveHook, userLeaveHookSpy, userEditLeaveHookSpy, userEditLeaveHookSpyCallback,
     DashboardRoute, NewsFeedRoute, InboxRoute, RedirectToInboxRoute, MessageRoute, UserRoute, AssignmentRoute,
-    routes
+    UserEditRoute, routes
 
   beforeEach(function () {
     node = document.createElement('div')
     newsLeaveHookSpy = expect.createSpy()
     userLeaveHookSpy = expect.createSpy()
+    userEditLeaveHookSpy = expect.createSpy((nextLocation, callback) => { userEditLeaveHookSpyCallback = callback })
+    userEditLeaveHookSpyCallback = undefined
 
     class Dashboard extends Component {
       render() {
@@ -56,6 +58,23 @@ describe('When a router enters a branch', function () {
       render() {
         return <div>assignment {this.props.params.assignmentId}</div>
       }
+    }
+
+    class UserEdit extends Component {
+      componentWillMount() {
+        this.context.router.setRouteLeaveHook(
+          this.props.route,
+          userEditLeaveHookSpy.andCallThrough()
+        )
+      }
+
+      render() {
+        return <div>edit this user</div>
+      }
+    }
+
+    UserEdit.contextTypes = {
+      router: routerShape.isRequired
     }
 
     class User extends Component {
@@ -147,10 +166,17 @@ describe('When a router enters a branch', function () {
       onLeave() { expect(this).toBe(AssignmentRoute) }
     }
 
+    UserEditRoute = {
+      path: 'edit',
+      component: UserEdit,
+      onEnter() { expect(this).toBe(UserEditRoute) },
+      onLeave() { expect(this).toBe(UserEditRoute) }
+    }
+
     UserRoute = {
       path: 'users/:userId',
       component: User,
-      childRoutes: [ AssignmentRoute ],
+      childRoutes: [ AssignmentRoute, UserEditRoute ],
       onEnter() { expect(this).toBe(UserRoute) },
       onLeave() { expect(this).toBe(UserRoute) }
     }
@@ -209,6 +235,30 @@ describe('When a router enters a branch', function () {
       expect(newsLeaveHookSpy.calls.length).toEqual(2)
       done()
     })
+  })
+
+  it('calls the route leave hooks asynchronously when leaving the route', function (done) {
+    const history = createHistory('/users/23/edit')
+
+    const steps = [
+      function () {
+        expect(userEditLeaveHookSpy.calls.length).toEqual(0)
+        history.push('/inbox')
+      },
+      function () {
+        expect(userEditLeaveHookSpy.calls.length).toEqual(1)
+        expect(this.state.location.pathname).toEqual('/users/23/edit')
+        userEditLeaveHookSpyCallback()
+      },
+      function () {
+        expect(this.state.location.pathname).toEqual('/inbox')
+        expect(userEditLeaveHookSpy.calls.length).toEqual(1)
+      }
+    ]
+
+    const execNextStep = execSteps(steps, done)
+
+    render(<Router history={history} onUpdate={execNextStep} routes={routes}/>, node, execNextStep)
   })
 
   it('does not call removed route leave hooks', function (done) {
