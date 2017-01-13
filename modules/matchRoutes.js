@@ -1,9 +1,10 @@
-import warning from './routerWarning'
 import { loopAsync } from './AsyncUtils'
+import { isPromise } from './PromiseUtils'
 import { matchPattern } from './PatternUtils'
+import warning from './routerWarning'
 import { createRoutes } from './RouteUtils'
 
-function getChildRoutes(route, location, callback) {
+function getChildRoutes(route, location, paramNames, paramValues, callback) {
   if (route.childRoutes) {
     return [ null, route.childRoutes ]
   }
@@ -13,7 +14,12 @@ function getChildRoutes(route, location, callback) {
 
   let sync = true, result
 
-  route.getChildRoutes(location, function (error, childRoutes) {
+  const partialNextState = {
+    location,
+    params: createParams(paramNames, paramValues)
+  }
+
+  const childRoutesReturn = route.getChildRoutes(partialNextState, (error, childRoutes) => {
     childRoutes = !error && createRoutes(childRoutes)
     if (sync) {
       result = [ error, childRoutes ]
@@ -23,32 +29,70 @@ function getChildRoutes(route, location, callback) {
     callback(error, childRoutes)
   })
 
+  if (isPromise(childRoutesReturn))
+    childRoutesReturn
+      .then(
+        childRoutes => callback(null, createRoutes(childRoutes)),
+        callback
+      )
+
   sync = false
   return result  // Might be undefined.
 }
 
-function getIndexRoute(route, location, callback) {
+function getIndexRoute(route, location, paramNames, paramValues, callback) {
   if (route.indexRoute) {
     callback(null, route.indexRoute)
   } else if (route.getIndexRoute) {
-    route.getIndexRoute(location, function (error, indexRoute) {
+    const partialNextState = {
+      location,
+      params: createParams(paramNames, paramValues)
+    }
+
+    const indexRoutesReturn = route.getIndexRoute(partialNextState, (error, indexRoute) => {
       callback(error, !error && createRoutes(indexRoute)[0])
     })
-  } else if (route.childRoutes) {
-    const pathless = route.childRoutes.filter(childRoute => !childRoute.path)
 
-    loopAsync(pathless.length, function (index, next, done) {
-      getIndexRoute(pathless[index], location, function (error, indexRoute) {
-        if (error || indexRoute) {
-          const routes = [ pathless[index] ].concat( Array.isArray(indexRoute) ? indexRoute : [ indexRoute ] )
-          done(error, routes)
-        } else {
-          next()
-        }
+    if (isPromise(indexRoutesReturn))
+      indexRoutesReturn
+        .then(
+          indexRoute => callback(null, createRoutes(indexRoute)[0]),
+          callback
+        )
+  } else if (route.childRoutes || route.getChildRoutes) {
+    const onChildRoutes = (error, childRoutes) => {
+      if (error) {
+        callback(error)
+        return
+      }
+
+      const pathless = childRoutes.filter(childRoute => !childRoute.path)
+
+      loopAsync(pathless.length, function (index, next, done) {
+        getIndexRoute(
+          pathless[index], location, paramNames, paramValues,
+          function (error, indexRoute) {
+            if (error || indexRoute) {
+              const routes = [ pathless[index] ].concat(
+                Array.isArray(indexRoute) ? indexRoute : [ indexRoute ]
+              )
+              done(error, routes)
+            } else {
+              next()
+            }
+          }
+        )
+      }, function (err, routes) {
+        callback(null, routes)
       })
-    }, function (err, routes) {
-      callback(null, routes)
-    })
+    }
+
+    const result = getChildRoutes(
+      route, location, paramNames, paramValues, onChildRoutes
+    )
+    if (result) {
+      onChildRoutes(...result)
+    }
   } else {
     callback()
   }
@@ -88,13 +132,17 @@ function matchRouteDeep(
   // Only try to match the path if the route actually has a pattern, and if
   // we're not just searching for potential nested absolute paths.
   if (remainingPathname !== null && pattern) {
-    const matched = matchPattern(pattern, remainingPathname)
-    if (matched) {
-      remainingPathname = matched.remainingPathname
-      paramNames = [ ...paramNames, ...matched.paramNames ]
-      paramValues = [ ...paramValues, ...matched.paramValues ]
-    } else {
-      remainingPathname = null
+    try {
+      const matched = matchPattern(pattern, remainingPathname)
+      if (matched) {
+        remainingPathname = matched.remainingPathname
+        paramNames = [ ...paramNames, ...matched.paramNames ]
+        paramValues = [ ...paramValues, ...matched.paramValues ]
+      } else {
+        remainingPathname = null
+      }
+    } catch (error) {
+      callback(error)
     }
 
     // By assumption, pattern is non-empty here, which is the prerequisite for
@@ -105,27 +153,30 @@ function matchRouteDeep(
         params: createParams(paramNames, paramValues)
       }
 
-      getIndexRoute(route, location, function (error, indexRoute) {
-        if (error) {
-          callback(error)
-        } else {
-          if (Array.isArray(indexRoute)) {
-            warning(
-              indexRoute.every(route => !route.path),
-              'Index routes should not have paths'
-            )
-            match.routes.push(...indexRoute)
-          } else if (indexRoute) {
-            warning(
-              !indexRoute.path,
-              'Index routes should not have paths'
-            )
-            match.routes.push(indexRoute)
-          }
+      getIndexRoute(
+        route, location, paramNames, paramValues,
+        function (error, indexRoute) {
+          if (error) {
+            callback(error)
+          } else {
+            if (Array.isArray(indexRoute)) {
+              warning(
+                indexRoute.every(route => !route.path),
+                'Index routes should not have paths'
+              )
+              match.routes.push(...indexRoute)
+            } else if (indexRoute) {
+              warning(
+                !indexRoute.path,
+                'Index routes should not have paths'
+              )
+              match.routes.push(indexRoute)
+            }
 
-          callback(null, match)
+            callback(null, match)
+          }
         }
-      })
+      )
 
       return
     }
@@ -156,7 +207,9 @@ function matchRouteDeep(
       }
     }
 
-    const result = getChildRoutes(route, location, onChildRoutes)
+    const result = getChildRoutes(
+      route, location, paramNames, paramValues, onChildRoutes
+    )
     if (result) {
       onChildRoutes(...result)
     }

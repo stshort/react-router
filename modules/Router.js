@@ -1,17 +1,12 @@
-import createHashHistory from 'history/lib/createHashHistory'
-import useQueries from 'history/lib/useQueries'
+import invariant from 'invariant'
 import React from 'react'
 
 import createTransitionManager from './createTransitionManager'
 import { routes } from './InternalPropTypes'
 import RouterContext from './RouterContext'
 import { createRoutes } from './RouteUtils'
-import { createRouterObject, createRoutingHistory } from './RouterUtils'
+import { createRouterObject, assignRouterState } from './RouterUtils'
 import warning from './routerWarning'
-
-function isDeprecatedHistory(history) {
-  return !history || !history.__v2_compatible__
-}
 
 const { func, object } = React.PropTypes
 
@@ -61,64 +56,52 @@ const Router = React.createClass({
     }
   },
 
-  componentWillMount() {
-    const { parseQueryString, stringifyQuery } = this.props
-    warning(
-      !(parseQueryString || stringifyQuery),
-      '`parseQueryString` and `stringifyQuery` are deprecated. Please create a custom history. http://tiny.cc/router-customquerystring'
+  createRouterObject(state) {
+    const { matchContext } = this.props
+    if (matchContext) {
+      return matchContext.router
+    }
+
+    const { history } = this.props
+    return createRouterObject(history, this.transitionManager, state)
+  },
+
+  createTransitionManager() {
+    const { matchContext } = this.props
+    if (matchContext) {
+      return matchContext.transitionManager
+    }
+
+    const { history } = this.props
+    const { routes, children } = this.props
+
+    invariant(
+      history.getCurrentLocation,
+      'You have provided a history object created with history v4.x or v2.x ' +
+        'and earlier. This version of React Router is only compatible with v3 ' +
+        'history objects. Please change to history v3.x.'
     )
 
-    const { history, transitionManager, router } = this.createRouterObjects()
+    return createTransitionManager(
+      history,
+      createRoutes(routes || children)
+    )
+  },
 
-    this._unlisten = transitionManager.listen((error, state) => {
+  componentWillMount() {
+    this.transitionManager = this.createTransitionManager()
+    this.router = this.createRouterObject(this.state)
+
+    this._unlisten = this.transitionManager.listen((error, state) => {
       if (error) {
         this.handleError(error)
       } else {
+        // Keep the identity of this.router because of a caveat in ContextUtils:
+        // they only work if the object identity is preserved.
+        assignRouterState(this.router, state)
         this.setState(state, this.props.onUpdate)
       }
     })
-
-    this.history = history
-    this.router = router
-  },
-
-  createRouterObjects() {
-    const { matchContext } = this.props
-    if (matchContext) {
-      return matchContext
-    }
-
-    let { history } = this.props
-    const { routes, children } = this.props
-
-    if (isDeprecatedHistory(history)) {
-      history = this.wrapDeprecatedHistory(history)
-    }
-
-    const transitionManager = createTransitionManager(
-      history, createRoutes(routes || children)
-    )
-    const router = createRouterObject(history, transitionManager)
-    const routingHistory = createRoutingHistory(history, transitionManager)
-
-    return { history: routingHistory, transitionManager, router }
-  },
-
-  wrapDeprecatedHistory(history) {
-    const { parseQueryString, stringifyQuery } = this.props
-
-    let createHistory
-    if (history) {
-      warning(false, 'It appears you have provided a deprecated history object to `<Router/>`, please use a history provided by ' +
-                     'React Router with `import { browserHistory } from \'react-router\'` or `import { hashHistory } from \'react-router\'`. ' +
-                     'If you are using a custom history please create it with `useRouterHistory`, see http://tiny.cc/router-usinghistory for details.')
-      createHistory = () => history
-    } else {
-      warning(false, '`Router` no longer defaults the history prop to hash history. Please use the `hashHistory` singleton instead. http://tiny.cc/router-defaulthistory')
-      createHistory = createHashHistory
-    }
-
-    return useQueries(createHistory)({ parseQueryString, stringifyQuery })
   },
 
   /* istanbul ignore next: sanity check */
@@ -153,7 +136,6 @@ const Router = React.createClass({
 
     return render({
       ...props,
-      history: this.history,
       router: this.router,
       location,
       routes,
